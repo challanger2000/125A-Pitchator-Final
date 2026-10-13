@@ -12,6 +12,7 @@ add_executable(PitchPointEditTests tests/PitchPointEditTests.cpp)
 add_executable(PitchCurveMouseEventsTests tests/CurveMouseEventsTests.cpp src/PitchCurveView.cpp)
 add_executable(PitchatorUILayoutTests tests/UILayoutTests.cpp)
 add_executable(ScaleNoteNamesTests tests/ScaleNoteNamesTests.cpp)
+add_executable(PitchatorDemoTimerTests tests/DemoTimerTests.cpp)
 target_compile_definitions(PitchatorUILayoutTests PRIVATE
  PITCHATOR_UIDESC_PATH="${CMAKE_SOURCE_DIR}/src/resource/pitchator.uidesc"
  PITCHATOR_LOGO_SRC_PATH="${CMAKE_SOURCE_DIR}/src/BrandLogoView.cpp"
@@ -28,6 +29,7 @@ add_test(NAME PitchPointEditTests COMMAND PitchPointEditTests)
 add_test(NAME PitchCurveMouseEventsTests COMMAND PitchCurveMouseEventsTests)
 add_test(NAME PitchatorUILayoutTests COMMAND PitchatorUILayoutTests)
 add_test(NAME ScaleNoteNamesTests COMMAND ScaleNoteNamesTests)
+add_test(NAME PitchatorDemoTimerTests COMMAND PitchatorDemoTimerTests)
 # VST3 processor/controller integration regression reproduces the
 # Steinberg Validator's zero-buffer BYPASS persistence sequence.
 
@@ -59,6 +61,7 @@ if(PITCHATOR_BUILD_VST3)
   RESOURCES src/resource/pitchator.uidesc
             src/resource/125A_Logo_Master_FINAL.svg)
  target_compile_features(Pitchator PRIVATE cxx_std_17)
+ target_compile_definitions(Pitchator PRIVATE PITCHATOR_DEMO_BUILD=1)
  if(WIN32)
   target_sources(Pitchator PRIVATE ${vst3sdk_SOURCE_DIR}/public.sdk/source/main/dllmain.cpp)
  endif()
@@ -70,4 +73,13 @@ if(PITCHATOR_BUILD_VST3)
  target_link_libraries(PitchatorParameterFlushTests PRIVATE sdk sdk_hosting vstgui_support)
  target_compile_features(PitchatorParameterFlushTests PRIVATE cxx_std_17)
  add_test(NAME PitchatorParameterFlushTests COMMAND PitchatorParameterFlushTests)
+
+ add_executable(PitchatorDemoProcessorTests tests/DemoProcessorTests.cpp
+  src/PitchatorVST.cpp src/PitchCurveView.cpp src/BrandLogoView.cpp
+  ${vst3sdk_SOURCE_DIR}/public.sdk/source/common/memorystream.cpp)
+ target_compile_definitions(PitchatorDemoProcessorTests PRIVATE
+  PITCHATOR_NO_FACTORY=1 PITCHATOR_DEMO_BUILD=1)
+ target_link_libraries(PitchatorDemoProcessorTests PRIVATE sdk sdk_hosting vstgui_support)
+ target_compile_features(PitchatorDemoProcessorTests PRIVATE cxx_std_17)
+ add_test(NAME PitchatorDemoProcessorTests COMMAND PitchatorDemoProcessorTests)
 endif()
