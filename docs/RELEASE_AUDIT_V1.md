@@ -75,3 +75,11 @@ No Final repository transfer or release-ready claim until relevant points above 
 - This is a user-reported acceptance result, not an instrumented per-control screenshot/automation test report. Keep the distinction from automated coverage; do not label unobserved detailed test cases independently PASS.
 - Windows automated release gates remain PASS in run 38331057978 (9/9 CTests, 47/47 Steinberg validator, 125A Plugin Tester including editor lifecycle and I/O event probe).
 - V1.0.0 Final repository source tree was transferred byte-for-byte (30/30 blobs matched) from development commit 6cb852758a215bfa3e67962d5baae6fa3f3674d1. No DSP/code changes from this documentation update.
+
+## Authoritative Final-repository Windows QA (2026-10-13)
+- Repository: `challanger2000/125A-Pitchator-Final`, branch `v1.0.0`.
+- GitHub Actions run [38334455905](https://github.com/challanger2000/125A-Pitchator-Final/actions/runs/38334455905): SUCCESS.
+- 9/9 CTest PASS; Steinberg Validator 47/47 PASS; official 125A Plugin Tester Final v0.2.9 PASS, including I/O event and editor lifecycle probes.
+- Build artifact `Pitchator-Windows-VST3-Prototype`, ID `11784188429` (GitHub archive size 1,645,210 bytes); QA diagnostics artifact ID `11784043653`.
+- User confirms Studio One function on 2026-10-13. This is user acceptance, not instrumented automated validation of every individual GUI action.
+- Release version is strictly **1.0.0**. Gumroad distribution ZIP final layout and independent archive inspection remain separate packaging tasks.
