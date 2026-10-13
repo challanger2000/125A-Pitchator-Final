@@ -8,6 +8,7 @@
 #include "public.sdk/source/vst/vsteditcontroller.h"
 #include "pluginterfaces/vst/ivstevents.h"
 #include <array>
+#include "DemoTimer.h"
 namespace VSTGUI {class CControl; class CTextButton; class CTextEdit; class CTextLabel;}
 namespace pitchator {class PitchCurveView;}
 namespace Steinberg::Vst {
@@ -41,7 +42,13 @@ private:
  pitchator::Settings settings_{};
  pitchator::Scheduler scheduler_{};
  bool previouslyPlaying_=false;
+ pitchator::DemoTimer demoTimer_{};
+ std::array<uint8_t,16*128> demoHeld_{};
+ std::array<uint8_t,16> demoChannelUsed_{};
+ bool demoCleanupSent_=false;
  void changeParam(ParamID,ParamValue) noexcept;
+ void demoTrack(const Event&) noexcept;
+ bool demoCleanup(IEventList*,int32) noexcept;
 };
 class PitchatorController final: public EditControllerEx1,
                                 public VSTGUI::VST3EditorDelegate,
