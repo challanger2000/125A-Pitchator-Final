@@ -46,6 +46,8 @@
    font="Title" font-color="Text" transparent="true" text-alignment="center"/>
   <view class="CTextLabel" origin="350, 60" size="500, 22" title="MIDI PITCH CURVE SEQUENCER"
    font="Small" font-color="Muted" transparent="true" text-alignment="center"/>
+  <view class="CTextLabel" origin="950, 34" size="90, 26" title="DEMO"
+    font="Section" font-color="Accent" transparent="true" text-alignment="center"/>
   <view class="CTextButton" control-tag="UiZoom" origin="1055, 30" size="110, 34"
     title="100 %" text-color="Text" font="Small" frame-color="Edge" kick-style="true"/>
   <!-- 8-group parameter grid. All controls share y=39 with centered column labels. -->
