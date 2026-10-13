@@ -68,3 +68,10 @@ No Final repository transfer or release-ready claim until relevant points above 
 - Branded VST3 artifact upload succeeded.
 - The former source-fix CI-pending blockers are now **verified closed**; any earlier 'CI pending' language in this audit describes the historical pre-run state.
 - **Still not a complete FINAL gate**: missing explicit host-level 150% resize/click matrix and comprehensive per-control automation, transport/tempo and downstream synthesizer checks remain separately NOT VERIFIED. No new code changes are warranted without finding a specific defect.
+
+## Studio One host acceptance — user confirmation (2026-10-13)
+- User reports the current Pitchator V1.0.0 works correctly in their DAW (Studio One): **user host acceptance PASS**.
+- Prior user feedback confirmed MIDI output, GUI interaction and project save/reopen. This latest statement confirms no outstanding observed DAW defect.
+- This is a user-reported acceptance result, not an instrumented per-control screenshot/automation test report. Keep the distinction from automated coverage; do not label unobserved detailed test cases independently PASS.
+- Windows automated release gates remain PASS in run 38331057978 (9/9 CTests, 47/47 Steinberg validator, 125A Plugin Tester including editor lifecycle and I/O event probe).
+- V1.0.0 Final repository source tree was transferred byte-for-byte (30/30 blobs matched) from development commit 6cb852758a215bfa3e67962d5baae6fa3f3674d1. No DSP/code changes from this documentation update.
