@@ -1,0 +1,102 @@
+name: Pitchator Windows VST3
+on:
+  # Manual-only: avoid further billable Actions without explicit new QA request.
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: v1.0.0 # Build from authoritative Final repository version branch.
+      - name: Configure pinned SDK
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+      - name: Build VST3 and Validator
+        run: cmake --build build --config Release --target Pitchator PitchEngineTests PitchSchedulerTests CurveMailboxTests PitchatorUIContractTests PitchatorParameterFlushTests PitchPointEditTests PitchCurveMouseEventsTests PitchatorUILayoutTests ScaleNoteNamesTests validator --parallel
+      - name: Core Tests
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Stage branded VST3 package before QA
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $raw = Get-ChildItem build -Directory -Recurse -Filter "Pitchator.vst3" |
+            Where-Object { Test-Path (Join-Path $_.FullName "Contents/x86_64-win/Pitchator.vst3") } |
+            Select-Object -First 1
+          if (-not $raw) { throw "SDK Pitchator.vst3 output missing" }
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          $target = Join-Path (Get-Location) "artifact/125A Pitchator.vst3"
+          Copy-Item -LiteralPath $raw.FullName -Destination $target -Recurse -Force
+          $binary = Join-Path $target "Contents/x86_64-win/Pitchator.vst3"
+          if (-not (Test-Path -LiteralPath $binary)) { throw "Staged VST3 DLL missing" }
+          Rename-Item -LiteralPath $binary -NewName "125A Pitchator.vst3"
+          if (-not (Test-Path -LiteralPath (Join-Path $target "Contents/x86_64-win/125A Pitchator.vst3"))) {
+            throw "Branded module rename failed"
+          }
+          if (Test-Path -LiteralPath (Join-Path $target "Contents/x86_64-win/Pitchator.vst3")) {
+            throw "Obsolete unbranded DLL detected"
+          }
+          Write-Host "Staged complete branded 125A Pitchator.vst3 bundle"
+      - name: Validate VST3
+        shell: pwsh
+        run: |
+          $bundle = Get-Item -LiteralPath "artifact/125A Pitchator.vst3"
+          $validator = Get-ChildItem build -File -Recurse -Filter validator.exe | Select-Object -First 1
+          if (-not $bundle -or -not $validator) { throw "125A Pitchator.vst3 or validator not found" }
+          & $validator.FullName $bundle.FullName
+          if ($LASTEXITCODE -ne 0) { throw "Validator failed" }
+      - name: Checkout authoritative 125A Plugin Tester Final v0.2.9
+        uses: actions/checkout@v5
+        with:
+          repository: challanger2000/125A-Plugin-Tester-Final
+          ref: fd246146994384e301c735e7d860b53aa06b18c5
+          path: tester-src
+          persist-credentials: false
+      - name: Configure 125A Plugin Tester
+        run: cmake -S tester-src -B tester-build -G "Visual Studio 17 2022" -A x64 -DSMTG_CREATE_PLUGIN_LINK=OFF
+      - name: Build 125A Plugin Tester and all isolated QA probes
+        run: cmake --build tester-build --config Release --target PluginTester125ADispatcher PluginTester125AGui PluginTester125ALauncher PluginTester125AWorker PluginTester125AReloadProbe PluginTester125AStateProbe PluginTester125AEditorLifecycleProbe PluginTester125AIOEventProbe PluginTester125AValidatorWrapper validator --parallel
+      - name: Run complete 125A Plugin Tester on validated VST3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bundle = Get-Item -LiteralPath "artifact/125A Pitchator.vst3"
+          $tester = Get-ChildItem tester-build -File -Recurse -Filter 125A_Plugin_Tester.exe | Select-Object -First 1
+          if (-not $bundle -or -not $tester) { throw "Missing validated Pitchator bundle or official 125A tester" }
+          $env:125A_PLUGIN_TESTER_REPORT_DIR = Join-Path (Get-Location) "qa-reports"
+          New-Item -ItemType Directory -Force $env:125A_PLUGIN_TESTER_REPORT_DIR | Out-Null
+          & $tester.FullName $bundle.FullName
+          $testerExit = $LASTEXITCODE
+          $reports = @(Get-ChildItem $env:125A_PLUGIN_TESTER_REPORT_DIR -File -ErrorAction SilentlyContinue)
+          foreach ($r in $reports) {
+            Write-Host "==== QA evidence: $($r.Name) ===="
+            if ($r.Extension -ne ".json") { Get-Content $r.FullName | Select-Object -Last 120 | Write-Host }
+          }
+          $result = $reports | Where-Object { $_.Name -like "*_125A_QA_Report.json" } | Select-Object -First 1
+          if (-not $result) { throw "125A QA did not produce the mandatory JSON report" }
+          $parsed = Get-Content $result.FullName -Raw | ConvertFrom-Json
+          if ($testerExit -ne 0 -or $parsed.status -ne "PASS") {
+            throw "125A Plugin Tester failed: launcher=$testerExit, status=$($parsed.status); inspect qa-reports artifact"
+          }
+          foreach ($pattern in @("*_125A_IO_Event_Probe.txt","*_125A_Editor_Lifecycle_Probe.txt")) {
+            $found = @($reports | Where-Object { $_.Name -like $pattern })
+            if ($found.Count -ne 1) { throw "Missing required QA report $pattern" }
+            $content = Get-Content $found[0].FullName -Raw
+            if ($content -notmatch "Result:\s*PASS") { throw "QA probe did not PASS: $($found[0].Name)" }
+          }
+          Write-Host "125A Plugin Tester: full suite, I/O event and editor lifecycle PASS"
+      - name: Archive 125A Plugin Tester diagnostics (including failures)
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: Pitchator-125A-Release-QA-Diagnostics
+          path: qa-reports/**
+          if-no-files-found: warn
+      - name: Upload VST3 prototype
+        uses: actions/upload-artifact@v5
+        with:
+          name: Pitchator-Windows-VST3-Prototype
+          # GitHub preserves the branded .vst3 folder and matching x64 DLL.
+          path: artifact/
+          if-no-files-found: error
