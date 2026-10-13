@@ -1,4 +1,5 @@
 name: Pitchator V1.0.0 Demo Release QA
+# QA revision: processor regression include fixed
 
 on:
   push:
