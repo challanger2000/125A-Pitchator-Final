@@ -1,0 +1,153 @@
+name: Pitchator V1.0.0 Demo Release QA
+
+on:
+  push:
+    branches:
+      - demo/v1.0.0-2026-10-13
+    paths:
+      - ".github/workflows/demo-v1.0.0.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pitchator-v1-demo
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure pinned SDK
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build Demo VST3, complete tests and Validator
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target Pitchator PitchEngineTests PitchSchedulerTests CurveMailboxTests PitchatorUIContractTests PitchatorParameterFlushTests PitchPointEditTests PitchCurveMouseEventsTests PitchatorUILayoutTests ScaleNoteNamesTests PitchatorDemoTimerTests PitchatorDemoProcessorTests validator --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run complete internal QA
+        shell: pwsh
+        run: |
+          ctest --test-dir build -C Release --output-on-failure -V
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Stage exact branded Demo VST3
+        id: pitchator
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $raw = Get-ChildItem build -Directory -Recurse -Filter "Pitchator.vst3" |
+            Where-Object { Test-Path (Join-Path $_.FullName "Contents/x86_64-win/Pitchator.vst3") } |
+            Select-Object -First 1
+          if (-not $raw) { throw "SDK Pitchator.vst3 output missing" }
+
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          $target = Join-Path (Get-Location) "artifact/125A Pitchator.vst3"
+          Copy-Item -LiteralPath $raw.FullName -Destination $target -Recurse -Force
+
+          $binary = Join-Path $target "Contents/x86_64-win/Pitchator.vst3"
+          if (-not (Test-Path -LiteralPath $binary)) { throw "Staged VST3 DLL missing" }
+          Rename-Item -LiteralPath $binary -NewName "125A Pitchator.vst3"
+
+          $finalBinary = Join-Path $target "Contents/x86_64-win/125A Pitchator.vst3"
+          if (-not (Test-Path -LiteralPath $finalBinary)) { throw "Branded module rename failed" }
+          if (Test-Path -LiteralPath (Join-Path $target "Contents/x86_64-win/Pitchator.vst3")) {
+            throw "Obsolete unbranded DLL detected"
+          }
+
+          $uidesc = Join-Path $target "Contents/Resources/pitchator.uidesc"
+          if (-not (Test-Path -LiteralPath $uidesc)) { throw "pitchator.uidesc missing" }
+          $ui = Get-Content -LiteralPath $uidesc -Raw
+          if ($ui -notmatch 'title="DEMO"') { throw "Visible DEMO badge missing" }
+
+          $moduleInfo = Join-Path $target "Contents/Resources/moduleinfo.json"
+          if (-not (Test-Path -LiteralPath $moduleInfo)) { throw "moduleinfo.json missing" }
+          $module = Get-Content -LiteralPath $moduleInfo -Raw
+          if ($module -notmatch '"Version"\s*:\s*"1\.0\.0"') { throw "Version 1.0.0 missing" }
+
+          $licenses = @(Get-ChildItem -LiteralPath (Join-Path $target "Contents") -Recurse -File |
+            Where-Object { $_.Name -match 'license' })
+          if ($licenses.Count -ne 0) { throw "Demo bundle unexpectedly contains license material" }
+
+          "plugin=$target" >> $env:GITHUB_OUTPUT
+
+      - name: Validate exact Demo VST3
+        shell: pwsh
+        env:
+          PITCHATOR_PLUGIN: ${{ steps.pitchator.outputs.plugin }}
+        run: |
+          $validator = Get-ChildItem build -File -Recurse -Filter validator.exe | Select-Object -First 1
+          if (-not $validator) { throw "validator.exe not found" }
+          & $validator.FullName "$env:PITCHATOR_PLUGIN"
+          if ($LASTEXITCODE -ne 0) { throw "Steinberg Validator failed" }
+
+      - name: Checkout authoritative 125A Plugin Tester Final v0.2.9
+        uses: actions/checkout@v5
+        with:
+          repository: challanger2000/125A-Plugin-Tester-Final
+          ref: fd246146994384e301c735e7d860b53aa06b18c5
+          path: tester-src
+          persist-credentials: false
+
+      - name: Configure 125A Plugin Tester
+        run: cmake -S tester-src -B tester-build -G "Visual Studio 17 2022" -A x64 -DSMTG_CREATE_PLUGIN_LINK=OFF
+
+      - name: Build 125A Plugin Tester and isolated probes
+        run: cmake --build tester-build --config Release --target PluginTester125ADispatcher PluginTester125AGui PluginTester125ALauncher PluginTester125AWorker PluginTester125AReloadProbe PluginTester125AStateProbe PluginTester125AEditorLifecycleProbe PluginTester125AIOEventProbe PluginTester125AValidatorWrapper validator --parallel
+
+      - name: Run complete 125A Plugin Tester on exact Demo VST3
+        shell: pwsh
+        env:
+          PITCHATOR_PLUGIN: ${{ steps.pitchator.outputs.plugin }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bundle = Get-Item -LiteralPath "$env:PITCHATOR_PLUGIN"
+          $tester = Get-ChildItem tester-build -File -Recurse -Filter 125A_Plugin_Tester.exe | Select-Object -First 1
+          if (-not $bundle -or -not $tester) { throw "Missing validated Pitchator Demo or official 125A tester" }
+
+          $env:125A_PLUGIN_TESTER_REPORT_DIR = Join-Path (Get-Location) "qa-reports"
+          New-Item -ItemType Directory -Force $env:125A_PLUGIN_TESTER_REPORT_DIR | Out-Null
+
+          & $tester.FullName "$($bundle.FullName)"
+          $testerExit = $LASTEXITCODE
+
+          $reports = @(Get-ChildItem $env:125A_PLUGIN_TESTER_REPORT_DIR -File -ErrorAction SilentlyContinue)
+          $result = $reports | Where-Object { $_.Name -like "*_125A_QA_Report.json" } | Select-Object -First 1
+          if (-not $result) { throw "125A QA did not produce mandatory JSON report" }
+          $parsed = Get-Content $result.FullName -Raw | ConvertFrom-Json
+
+          if ($testerExit -ne 0 -or $parsed.status -ne "PASS") {
+            throw "125A Plugin Tester failed: launcher=$testerExit, status=$($parsed.status)"
+          }
+
+          foreach ($pattern in @("*_125A_IO_Event_Probe.txt","*_125A_Editor_Lifecycle_Probe.txt")) {
+            $found = @($reports | Where-Object { $_.Name -like $pattern })
+            if ($found.Count -ne 1) { throw "Missing required QA report $pattern" }
+            $content = Get-Content $found[0].FullName -Raw
+            if ($content -notmatch "Result:\s*PASS") { throw "QA probe did not PASS: $($found[0].Name)" }
+          }
+
+          $textReport = $reports | Where-Object { $_.Name -like "*_125A_QA_Report.txt" } | Select-Object -First 1
+          if (-not $textReport) { throw "125A text QA report missing" }
+          $qaText = Get-Content $textReport.FullName -Raw
+          if ($qaText -notmatch "0 WARNING / 0 FAIL") { throw "125A QA report not clean" }
+
+      - name: Upload Demo QA diagnostics
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: Pitchator-v1.0.0-Demo-Release-QA
+          path: qa-reports/**
+          if-no-files-found: warn
+
+      - name: Upload exact tested Demo VST3
+        uses: actions/upload-artifact@v5
+        with:
+          name: 125A-Pitchator-v1.0.0-Windows-x64-DEMO
+          path: artifact/
+          if-no-files-found: error
