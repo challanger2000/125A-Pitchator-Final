@@ -71,6 +71,9 @@ PitchatorProcessor::PitchatorProcessor(){
  pattern_.upsert({1920,1,pitchator::Curve::Linear});
  pattern_.upsert({2880,0,pitchator::Curve::Linear});
  publishedCurve_.publish(pattern_);
+#if defined(PITCHATOR_DEMO_BUILD)
+ demoTimer_.enable(44100.0);
+#endif
 }
 tresult PLUGIN_API PitchatorProcessor::initialize(FUnknown* ctx){
  auto r=AudioEffect::initialize(ctx);if(r!=kResultOk)return r;
@@ -108,6 +111,77 @@ void PitchatorProcessor::changeParam(ParamID id,ParamValue x) noexcept {
  default:break;
  }
 }
+void PitchatorProcessor::demoTrack(const Event& e) noexcept {
+ if(!demoTimer_.enabled())return;
+ int ch=-1,pitch=-1;
+ bool on=false,off=false;
+ if(e.type==Event::kNoteOnEvent){
+  ch=e.noteOn.channel;pitch=e.noteOn.pitch;
+  on=e.noteOn.velocity>0.f;off=!on;
+ }else if(e.type==Event::kNoteOffEvent){
+  ch=e.noteOff.channel;pitch=e.noteOff.pitch;off=true;
+ }
+ if(ch<0||ch>=16||pitch<0||pitch>=128)return;
+ const size_t index=static_cast<size_t>(ch*128+pitch);
+ if(on){
+  if(demoHeld_[index]<255)++demoHeld_[index];
+  demoChannelUsed_[static_cast<size_t>(ch)]=1;
+ }else if(off&&demoHeld_[index]>0){
+  --demoHeld_[index];
+ }
+}
+
+bool PitchatorProcessor::demoCleanup(IEventList* out,int32 offset) noexcept {
+ if(!out)return false;
+ for(int ch=0;ch<16;++ch){
+  for(int pitch=0;pitch<128;++pitch){
+   const size_t index=static_cast<size_t>(ch*128+pitch);
+   if(demoHeld_[index]==0)continue;
+   Event off{};
+   off.type=Event::kNoteOffEvent;
+   off.busIndex=0;
+   off.sampleOffset=offset;
+   off.noteOff.channel=static_cast<int16>(ch);
+   off.noteOff.pitch=static_cast<int16>(pitch);
+   off.noteOff.tuning=0.f;
+   off.noteOff.velocity=0.f;
+   off.noteOff.noteId=-1;
+   if(out->addEvent(off)!=kResultOk)return false;
+  }
+ }
+ for(int ch=0;ch<16;++ch){
+  if(!demoChannelUsed_[static_cast<size_t>(ch)])continue;
+
+  Event center{};
+  center.type=Event::kLegacyMIDICCOutEvent;
+  center.busIndex=0;
+  center.sampleOffset=offset;
+  center.midiCCOut.channel=static_cast<int8>(ch);
+  center.midiCCOut.controlNumber=static_cast<uint8>(kPitchBend);
+  center.midiCCOut.value=0;
+  center.midiCCOut.value2=64;
+  if(out->addEvent(center)!=kResultOk)return false;
+
+  // Defensive MIDI CC 123 in addition to exact NoteOff events. This prevents
+  // a downstream instrument from retaining stacked same-pitch voices.
+  Event allOff{};
+  allOff.type=Event::kLegacyMIDICCOutEvent;
+  allOff.busIndex=0;
+  allOff.sampleOffset=offset;
+  allOff.midiCCOut.channel=static_cast<int8>(ch);
+  allOff.midiCCOut.controlNumber=123;
+  allOff.midiCCOut.value=0;
+  allOff.midiCCOut.value2=0;
+  if(out->addEvent(allOff)!=kResultOk)return false;
+ }
+ demoHeld_.fill(0);
+ demoChannelUsed_.fill(0);
+ scheduler_.reset();
+ previouslyPlaying_=false;
+ demoCleanupSent_=true;
+ return true;
+}
+
 tresult PLUGIN_API PitchatorProcessor::process(ProcessData& d){
  // Atomic publish from GUI; the audio callback NEVER locks or allocates.
  const uint64_t latest=publishedCurve_.revision();
@@ -124,9 +198,7 @@ tresult PLUGIN_API PitchatorProcessor::process(ProcessData& d){
   }
  }
  // VST3 permits parameter-only flushes with zero samples, no audio buffers
- // and no event output list. The host uses these flushes for state/preset
- // persistence (including Steinberg's bypass persistence validator).
- // Apply the *last* point from each queue before returning.
+ // and no event output list. Keep state/preset behavior available in Demo.
  if(!d.outputEvents){
   if(d.inputParameterChanges){
    for(int32 i=0;i<d.inputParameterChanges->getParameterCount();++i){
@@ -142,6 +214,7 @@ tresult PLUGIN_API PitchatorProcessor::process(ProcessData& d){
   scheduler_.endBlock(d.numSamples);
   return kResultOk;
  }
+
  size_t pc=0,ec=0;
  if(d.inputParameterChanges)
   for(int32 i=0;i<d.inputParameterChanges->getParameterCount();++i){
@@ -149,49 +222,55 @@ tresult PLUGIN_API PitchatorProcessor::process(ProcessData& d){
    for(int32 j=0;j<q->getPointCount();++j){
     int32 at=0;ParamValue x=0;if(q->getPoint(j,at,x)!=kResultOk)continue;
     if(pc>=changes_.size())return kResultFalse;
-    Change c{std::clamp(at,0,std::max(0,d.numSamples-1)),q->getParameterId(),x};
+    Change change{std::clamp(at,0,std::max(0,d.numSamples-1)),q->getParameterId(),x};
     size_t pos=pc;
-    while(pos>0&&changes_[pos-1].offset>c.offset){changes_[pos]=changes_[pos-1];--pos;}
-    changes_[pos]=c;++pc;
+    while(pos>0&&changes_[pos-1].offset>change.offset){changes_[pos]=changes_[pos-1];--pos;}
+    changes_[pos]=change;++pc;
    }
   }
+
+ bool inputOverflow=false;
+ bool blockHasNoteOn=false;
  if(d.inputEvents)
   for(int32 i=0;i<d.inputEvents->getEventCount();++i){
    Event e{};if(d.inputEvents->getEvent(i,e)!=kResultOk)continue;
-   if(ec>=inputs_.size()){
-    // Overflow: preserve all incoming notes and explicitly center any
-    // prior channel bends BEFORE resetting internal scheduler state.
-    if(!scheduler_.center(0,[&](pitchator::Bend bend){
-     Event reset{};reset.type=Event::kLegacyMIDICCOutEvent;
-     reset.busIndex=0;reset.sampleOffset=bend.offset;
-     reset.midiCCOut.channel=static_cast<int8>(bend.channel);
-     reset.midiCCOut.controlNumber=static_cast<uint8>(kPitchBend);
-     reset.midiCCOut.value=static_cast<int8>(bend.value&127u);
-     reset.midiCCOut.value2=static_cast<int8>((bend.value>>7)&127u);
-     return d.outputEvents->addEvent(reset)==kResultOk;
-    }))return kResultFalse;
-    scheduler_.reset();
-    for(int32 k=0;k<d.inputEvents->getEventCount();++k){
-     Event pass{};if(d.inputEvents->getEvent(k,pass)==kResultOk)
-      if(d.outputEvents->addEvent(pass)!=kResultOk)return kResultFalse;
-    }
-    return kResultOk;
-   }
+   if(e.type==Event::kNoteOnEvent&&e.noteOn.velocity>0.f)blockHasNoteOn=true;
+   if(ec>=inputs_.size()){inputOverflow=true;break;}
    e.sampleOffset=std::clamp(e.sampleOffset,0,std::max(0,d.numSamples-1));
    size_t pos=ec;while(pos>0&&inputs_[pos-1].sampleOffset>e.sampleOffset){
     inputs_[pos]=inputs_[pos-1];--pos;
    }
    inputs_[pos]=e;++ec;
   }
+
  pitchator::Clock clock{};clock.rate=processSetup.sampleRate;
  if(d.processContext){
-  const auto& c=*d.processContext;
-  clock.rate=c.sampleRate;
-  clock.playing=(c.state&ProcessContext::kPlaying)!=0;
-  clock.valid=(c.state&ProcessContext::kProjectTimeMusicValid)!=0&&
-              (c.state&ProcessContext::kTempoValid)!=0;
-  clock.ppq=c.projectTimeMusic;clock.tempo=c.tempo;
+  const auto& ctx=*d.processContext;
+  clock.rate=ctx.sampleRate;
+  clock.playing=(ctx.state&ProcessContext::kPlaying)!=0;
+  clock.valid=(ctx.state&ProcessContext::kProjectTimeMusicValid)!=0&&
+              (ctx.state&ProcessContext::kTempoValid)!=0;
+  clock.ppq=ctx.projectTimeMusic;clock.tempo=ctx.tempo;
  }
+
+ int32 processingSamples=d.numSamples;
+ bool demoCutoffThisBlock=false;
+ if(demoTimer_.enabled()){
+  demoTimer_.setSampleRate(clock.rate);
+  bool held=false;
+  for(const auto count:demoHeld_)if(count){held=true;break;}
+  const bool active=clock.playing||held||blockHasNoteOn||inputOverflow;
+  const bool expiredBefore=demoTimer_.expired();
+  processingSamples=expiredBefore?0:demoTimer_.allowedSamples(active,d.numSamples);
+  demoCutoffThisBlock=demoTimer_.expired()&&processingSamples<d.numSamples;
+
+  if(processingSamples<=0&&demoTimer_.expired()){
+   for(size_t i=0;i<pc;++i)changeParam(changes_[i].id,changes_[i].value);
+   if(!demoCleanupSent_&&!demoCleanup(d.outputEvents,0))return kResultFalse;
+   return kResultOk;
+  }
+ }
+
  auto sendBend=[&](pitchator::Bend b){
   Event e{};e.type=Event::kLegacyMIDICCOutEvent;e.busIndex=0;e.sampleOffset=b.offset;
   e.midiCCOut.channel=static_cast<int8>(b.channel);
@@ -200,26 +279,46 @@ tresult PLUGIN_API PitchatorProcessor::process(ProcessData& d){
   e.midiCCOut.value2=static_cast<int8>((b.value>>7)&127u);
   return d.outputEvents->addEvent(e)==kResultOk;
  };
+
+ if(inputOverflow){
+  // Preserve the original overflow fallback, but never let it bypass the Demo cutoff.
+  if(!scheduler_.center(0,sendBend))return kResultFalse;
+  scheduler_.reset();
+  if(d.inputEvents){
+   for(int32 k=0;k<d.inputEvents->getEventCount();++k){
+    Event pass{};if(d.inputEvents->getEvent(k,pass)!=kResultOk)continue;
+    pass.sampleOffset=std::clamp(pass.sampleOffset,0,std::max(0,d.numSamples-1));
+    if(pass.sampleOffset>=processingSamples)continue;
+    if(d.outputEvents->addEvent(pass)!=kResultOk)return kResultFalse;
+    demoTrack(pass);
+   }
+  }
+  if(demoCutoffThisBlock&&!demoCleanup(d.outputEvents,processingSamples))return kResultFalse;
+  return kResultOk;
+ }
+
  if(previouslyPlaying_&&!clock.playing&&!scheduler_.center(0,sendBend))return kResultFalse;
  previouslyPlaying_=clock.playing;
+
  size_t pi=0,ei=0;
- for(int32 pos=0;pos<d.numSamples;++pos){
+ for(int32 pos=0;pos<processingSamples;++pos){
   while(pi<pc&&changes_[pi].offset==pos){
    changeParam(changes_[pi].id,changes_[pi].value);++pi;
   }
   while(ei<ec&&inputs_[ei].sampleOffset==pos){
    Event e=inputs_[ei++];
-   bool isOn=e.type==Event::kNoteOnEvent&&e.noteOn.velocity>0;
-   bool isOff=e.type==Event::kNoteOffEvent||
-              (e.type==Event::kNoteOnEvent&&e.noteOn.velocity<=0);
+   const bool isOn=e.type==Event::kNoteOnEvent&&e.noteOn.velocity>0;
+   const bool isOff=e.type==Event::kNoteOffEvent||
+                    (e.type==Event::kNoteOnEvent&&e.noteOn.velocity<=0);
    if(isOn){
     scheduler_.noteOn(e.noteOn.channel,e.noteOn.pitch,settings_,pos,clock,pattern_.lengthTicks());
     if(!scheduler_.render(pos,clock,pattern_,settings_,true,sendBend))return kResultFalse;
    }
    if(d.outputEvents->addEvent(e)!=kResultOk)return kResultFalse;
+   demoTrack(e);
    if(isOff){
-    int ch=e.type==Event::kNoteOffEvent?e.noteOff.channel:e.noteOn.channel;
-    int pitch=e.type==Event::kNoteOffEvent?e.noteOff.pitch:e.noteOn.pitch;
+    const int ch=e.type==Event::kNoteOffEvent?e.noteOff.channel:e.noteOn.channel;
+    const int pitch=e.type==Event::kNoteOffEvent?e.noteOff.pitch:e.noteOn.pitch;
     scheduler_.noteOff(ch,pitch);
     if(!scheduler_.render(pos,clock,pattern_,settings_,true,sendBend))return kResultFalse;
    }
@@ -229,7 +328,16 @@ tresult PLUGIN_API PitchatorProcessor::process(ProcessData& d){
      !scheduler_.render(pos,clock,pattern_,settings_,exactJump,sendBend))
    return kResultFalse;
  }
+
  if(d.numSamples==0)for(size_t i=0;i<pc;++i)changeParam(changes_[i].id,changes_[i].value);
+
+ if(demoCutoffThisBlock){
+  // Preserve state automation after the musical cutoff, but emit no further MIDI.
+  while(pi<pc){changeParam(changes_[pi].id,changes_[pi].value);++pi;}
+  if(!demoCleanup(d.outputEvents,processingSamples))return kResultFalse;
+  return kResultOk;
+ }
+
  scheduler_.endBlock(d.numSamples);
  return kResultOk;
 }
