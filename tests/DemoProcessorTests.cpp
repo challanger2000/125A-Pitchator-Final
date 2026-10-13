@@ -1,5 +1,6 @@
 #include "../src/PitchatorVST.h"
 #include "public.sdk/source/vst/hosting/eventlist.h"
+#include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include <cstdio>
 #include <memory>
 
